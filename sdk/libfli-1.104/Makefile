@@ -17,7 +17,7 @@ endif
 DIR	= $(shell pwd)
 CC	= gcc
 INC	= $(DIR) $(DIR)/unix
-CFLAGS	= -Wall -O2 -g $(patsubst %, -I%, $(INC))
+CFLAGS	= -Wall -O2 -g $(patsubst %, -I%, $(INC)) -fPIC
 
 ifeq ($(UNAME), Darwin)
 	CFLAGS += -arch i386 -arch x86_64
@@ -45,9 +45,12 @@ FILT	= libfli-filter-focuser.o
 
 ALLOBJ	= $(SYS) $(DEBUG) $(MEM) $(IO) $(CAM) $(FILT)
 
+all: libfli.a libfli.so
+
 libfli.a: libfli.o $(ALLOBJ)
 	$(AR) $(ARFLAGS) $@ $^
-
+libfli.so: libfli.o $(ALLOBJ)
+	$(CC) -shared -o $@ $^
 doc: doc-html doc-pdf
 
 .PHONY: doc-html
