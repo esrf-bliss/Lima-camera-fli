@@ -87,10 +87,7 @@ void ShutterCtrlObj::setMode(ShutterMode shut_mode)
     if (!checkMode(shut_mode))
 	THROW_HW_ERROR(InvalidValue) << "Invalid " 
 				     << DEB_VAR1(shut_mode);
-    
-    Camera::ShutterMode cam_mode;
-    cam_mode = (shut_mode == ShutterAutoFrame) ? Camera::FRAME : Camera::MANUAL;
-    m_cam.setShutterMode(cam_mode);
+    m_cam.setShutterMode(shut_mode);
 }
 
 //-----------------------------------------------------
@@ -100,10 +97,7 @@ void ShutterCtrlObj::getMode(ShutterMode& shut_mode) const
 {
     DEB_MEMBER_FUNCT();
     
-    Camera::ShutterMode cam_mode;
-    m_cam.getShutterMode(cam_mode);
-    shut_mode = (cam_mode == Camera::FRAME) ? ShutterAutoFrame : ShutterManual;
-    DEB_RETURN() << DEB_VAR1(shut_mode);
+    m_cam.getShutterMode(shut_mode);
 }
 
 //-----------------------------------------------------

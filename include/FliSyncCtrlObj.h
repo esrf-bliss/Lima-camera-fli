@@ -37,7 +37,7 @@ namespace lima
  * \brief Control object providing Fli synchronization interface
  *******************************************************************/
 
-	class LIBFLI_API SyncCtrlObj : public HwSyncCtrlObj
+	class SyncCtrlObj : public HwSyncCtrlObj
 	{
 	    DEB_CLASS_NAMESPC(DebModCamera, "SyncCtrlObj", "Fli");
 

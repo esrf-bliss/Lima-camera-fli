@@ -26,6 +26,7 @@
 #include <limits>
 #include "lima/HwMaxImageSizeCallback.h"
 #include "lima/HwBufferMgr.h"
+#include "FliCompatibility.h"
 
 #include <ostream>
 #include <string>
@@ -49,20 +50,11 @@ namespace lima
 	    DEB_CLASS_NAMESPC(DebModCamera, "Camera", "Fli");
 	    friend class Interface;
 	public:
-
-	    enum FrameType {
-	      FrameTypeNormal = FLI_FRAME_TYPE_NORMAL,
-	      FrameTypeDark = FLI_FRAME_TYPE_DARK
+	    enum Status
+	    {
+	      Ready, Exposure, Readout, Latency, Fault
 	    };
-
-	    enum TemperatureChannel {
-	      TemperatureChannelInternal = FLI_TEMPERATURE_INTERNAL,
-	      TemperatureChannelExternal = FLI_TEMPERATURE_EXTERNAL,
-	      TemperatureChannelCcd      = FLI_TEMPERATURE_CCD,
-	      TemperatureChannelBase     = FLI_TEMPERATURE_BASE
-	    };
-
-	    enum Status {
+	    /*	    enum Status {
 	      StatusUnknown = FLI_CAMERA_STATUS_UNKNOWN,
 	      StatusMask    = FLI_CAMERA_STATUS_MASK,
 	      StatusIdle    = FLI_CAMERA_STATUS_IDLE,
@@ -70,7 +62,7 @@ namespace lima
 	      StatusExposing = FLI_CAMERA_STATUS_EXPOSING,
 	      StatusDataReady = FLI_CAMERA_DATA_READY
 	    };
-
+	    */
 	    enum DebugLevel {
 	      DebugNone = FLIDEBUG_NONE,
 	      DebugInfo = FLIDEBUG_INFO,
@@ -80,12 +72,8 @@ namespace lima
 	      DebugAll  = FLIDEBUG_ALL 
 	    };
 
-	    enum FanSpeed {
-	      FanSpeedOn  = FLI_FAN_SPEED_ON,
-	      FanSpeedOff = FLI_FAN_SPEED_OFF
-	    };
 
-	    Camera(int camera_number=0);
+	    Camera(const std::string& camera_path);
 	    ~Camera();
 
 	    void prepareAcq();
@@ -143,36 +131,56 @@ namespace lima
 	    void reset();
 
 	    // -- Fli specific
-	    void getFrameType(FrameType& frametype);
-	    void setFrameType(FrameType frametype);
-	    void getVersions(std::string& version);
 	    void setTemperatureSP(double temperature);
 	    void getTemperatureSP(double& temperature);
-	    void getTemperatures (double& internal, double& external, double& ccd, double& base);
+	    void getTemperatureCCD (double& temperature);
+	    void getTemperatureBase (double& temperature);
 	    void getCoolerPower(double& power);
-	    void getIOPort(long& ioport);
-	    void setIOPort(long ioport);
-	    void getIOPortDirection(long& direction);
-	    void setIOPortDirection(long direction);
+	    void setShutterLevel(int level);
+	    void getShutterLevel(int& level);
+	    //void getIOPort(long& ioport);
+	    //void setIOPort(long ioport);
+	    //void getIOPortDirection(long& direction);
+	    //void setIOPortDirection(long direction);
 	    
 
 	private:
-	    class _AcqThread;
-	    friend class _AcqThread;
-	    void _stopAcq(bool);
-	    void _setStatus(Camera::Status status,bool force);
-
+	    class CameraThread: public CmdThread
+	    {
+	      DEB_CLASS_NAMESPC(DebModCamera, "CameraThread", "Lambda");
+	    public:
+	      enum
+	      { // Status
+		Ready = MaxThreadStatus, Exposure, Readout, Latency,
+	      };
+	      
+	      enum
+	      { // Cmd
+		StartAcq = MaxThreadCmd, StopAcq,
+	      };
+	      
+	      CameraThread(Camera& cam);	      
+	      virtual void start();
+	      bool m_force_stop;
+	      
+	    protected:	      
+	      virtual void init();
+	      virtual void execCmd(int cmd);
+	    private:
+	      void execStartAcq();
+	      void execStopAcq();
+	      Camera* m_cam;
+	      
+	    };
+	    friend class CameraThread;
+	    
 	    //- acquisition thread stuff    
-	    _AcqThread*                 m_acq_thread;
-	    Cond                        m_cond;
+	    CameraThread                m_thread;
 
 	    //- lima stuff
 	    SoftBufferCtrlObj	        m_buffer_ctrl_obj;
 	    int                         m_nb_frames;    
 	    Camera::Status              m_status;
-	    volatile bool               m_wait_flag;
-	    volatile bool               m_quit;
-	    volatile bool               m_thread_running;
 	    int                         m_image_number;
 	    int                         m_timeout;
 	    double                      m_latency_time;
@@ -180,18 +188,25 @@ namespace lima
 	    Bin                         m_bin;
 	    Bin                         m_bin_max;
 	    TrigMode                    m_trig_mode;
-
+	    int                         m_acq_frame_nb;
 	    ShutterMode                 m_shutter_mode;
 	    bool                        m_shutter_state;
         
 	    //- camera stuff 
 	    string                      m_detector_model;
 	    string                      m_detector_type;
-	    int                         m_detector_serial;
+	    string                      m_detector_serial;
+	    long                        m_detector_hw_rev;
+	    long                        m_detector_fw_rev;
+	    pair<double, double>        m_pixel_size;
+	    pair<Point, Point>          m_array_area;
+	    pair<Point, Point>          m_visible_area;
 	    float                       m_exp_time;
     
 	    //- Fli SDK stuff
 	    flidev_t                    m_device;
+	    flibitdepth_t               m_bit_depth;
+	    flishutter_t                m_shutter_level;
 	    double                      m_temperature_sp;
 
 	};

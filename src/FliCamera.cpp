@@ -40,144 +40,211 @@ using namespace std;
 {									\
   long ret_code = command;						\
   if ( ret_code != 0 )						\
-    THROW_HW_ERROR(Error) << error_prefix << DEB_VAR1( strerror((int)-error_code) ); \
+      THROW_HW_ERROR(Error) << error_prefix << ": " << strerror((int)-ret_code); \
 }
-//---------------------------
-//- utility thread
-//---------------------------
 
-class Camera::_AcqThread : public Thread
+
+//---------------------------------------------------------------------------------------
+//! Camera::CameraThread::CameraThread()
+//---------------------------------------------------------------------------------------
+Camera::CameraThread::CameraThread(Camera& cam)
+  : m_cam(&cam)
 {
-    DEB_CLASS_NAMESPC(DebModCamera, "Camera", "_AcqThread");
-public:
-    _AcqThread(Camera &aCam);
-    virtual ~_AcqThread();
-    
-protected:
-    virtual void threadFunction();
-    
-private:
-    Camera&    m_cam;
-};
+    DEB_MEMBER_FUNCT();
+    DEB_TRACE() << "CameraThread::CameraThread - BEGIN";
+    m_cam->m_acq_frame_nb = 0;
+    m_force_stop = false;
+    DEB_TRACE() << "CameraThread::CameraThread - END";
+}
 
+//---------------------------------------------------------------------------------------
+//! Camera::CameraThread::start()
+//---------------------------------------------------------------------------------------
+void Camera::CameraThread::start()
+{
+    DEB_MEMBER_FUNCT();
+    DEB_TRACE() << "CameraThread::start - BEGIN";
+    CmdThread::start();
+    waitStatus(Ready);
+    DEB_TRACE() << "CameraThread::start - END";
+}
+
+//---------------------------------------------------------------------------------------
+//! Camera::CameraThread::init()
+//---------------------------------------------------------------------------------------
+void Camera::CameraThread::init()
+{
+    DEB_MEMBER_FUNCT();
+    DEB_TRACE() << "CameraThread::init - BEGIN";
+    setStatus(Ready);
+    DEB_TRACE() << "CameraThread::init - END";
+}
+
+//---------------------------------------------------------------------------------------
+//! Camera::CameraThread::execCmd()
+//---------------------------------------------------------------------------------------
+void Camera::CameraThread::execCmd(int cmd)
+{
+    DEB_MEMBER_FUNCT();
+    DEB_TRACE() << "CameraThread::execCmd - BEGIN";
+    int status = getStatus();
+    switch (cmd)
+    {
+    case StartAcq:
+	if (status != Ready)
+	    throw LIMA_HW_EXC(InvalidValue, "Not Ready to StartAcq");
+	execStartAcq();
+	break;
+    }
+    DEB_TRACE() << "CameraThread::execCmd - END";
+}
+
+
+#define READ_STATUS() \
+{ \
+    THROW_IF_NOT_SUCCESS(FLIGetDeviceStatus(m_cam->m_device, &camera_status), "Cannot get camera status "); \
+    THROW_IF_NOT_SUCCESS(FLIGetExposureStatus(m_cam->m_device, &remaining_exposure), "Cannot get remaining exp time ");	\
+}
+
+#define IMAGE_READY ( ((camera_status == FLI_CAMERA_STATUS_UNKNOWN) && (remaining_exposure == 0)) || \
+		     ((camera_status != FLI_CAMERA_STATUS_UNKNOWN) && ((camera_status & FLI_CAMERA_DATA_READY) != 0)) )
+
+//---------------------------------------------------------------------------------------
+//! Camera::CameraThread::execStartAcq()
+//---------------------------------------------------------------------------------------
+void Camera::CameraThread::execStartAcq()
+{
+	
+    DEB_MEMBER_FUNCT();
+    DEB_TRACE() << "CameraThread::execStartAcq - BEGIN";
+    setStatus(Exposure);
+    
+    StdBufferCbMgr& buffer_mgr = m_cam->m_buffer_ctrl_obj.getBuffer();
+    buffer_mgr.setStartTimestamp(Timestamp::now());
+    
+    
+    int acq_frame_nb;
+    long remaining_exposure = 0;
+    long camera_status = 0;
+
+    FrameDim frame_dim = buffer_mgr.getFrameDim();
+    int  frame_size = frame_dim.getMemSize();
+    
+    // -- start acquisition, try with video mode
+    THROW_IF_NOT_SUCCESS(FLIStartVideoMode(m_cam->m_device), "Cannot start video acquisition ");
+
+    m_cam->m_acq_frame_nb = 0;
+    acq_frame_nb = 0;
+
+    bool continueAcq = true;
+    while(continueAcq && (!m_cam->m_nb_frames || m_cam->m_acq_frame_nb < m_cam->m_nb_frames))
+    {
+	
+	// -- read a first camera status
+	READ_STATUS();
+	// -- wait for an image
+	while (!m_force_stop && !IMAGE_READY)
+	{
+	    READ_STATUS();
+	    DEB_TRACE() << DEB_VAR2(camera_status, remaining_exposure);
+	    usleep(100000);
+	}
+	setStatus(Readout);	
+	buffer_mgr.setStartTimestamp(Timestamp::now());
+	void *ptr = buffer_mgr.getFrameBufferPtr(m_cam->m_acq_frame_nb);
+
+	THROW_IF_NOT_SUCCESS(FLIGrabVideoFrame(m_cam->m_device, ptr, (size_t)frame_size), "Cannot grab video frame ");
+	DEB_TRACE() << "Declare a new Frame Ready.";
+	HwFrameInfoType frame_info;
+	frame_info.acq_frame_nb = m_cam->m_acq_frame_nb;
+	buffer_mgr.newFrameReady(frame_info);
+	
+	acq_frame_nb++;
+	m_cam->m_acq_frame_nb = acq_frame_nb;
+	    
+	
+	if(m_force_stop)
+	{
+	    continueAcq = false;
+	    m_force_stop = false;
+	    break;
+	}
+
+    } /* End while */
+
+  
+    // stop acquisition
+    THROW_IF_NOT_SUCCESS(FLICancelExposure(m_cam->m_device), "Canot cancel exposure ");
+    
+    
+    setStatus(Ready);
+    
+    DEB_TRACE() << "CameraThread::execStartAcq - END";
+}
 
 //---------------------------
 // @brief  Ctor
 //---------------------------
-Camera::Camera(int camera_number)
-    : m_status(Ready),
-      m_wait_flag(true),
-      m_quit(false),
-      m_thread_running(true),
+Camera::Camera(const std::string& camera_path)
+    : m_thread(*this),
       m_image_number(0),
       m_latency_time(0.),
       m_bin(1,1),
       m_shutter_state(false),
-      m_fan_mode(FAN_UNSUPPORTED),
-      m_exp_time(1.)
+      m_exp_time(1.),
+      m_shutter_level(FLI_SHUTTER_EXTERNAL_TRIGGER_HIGH),
+      m_detector_type("Fli")
 {
     DEB_CONSTRUCTOR();
-    m_camera_number = camera_number;
-  
-    // --- Get available cameras and select the choosen one.
-    int numCameras;
-    DEB_TRACE() << "Get all attached cameras";
-    THROW_IF_NOT_SUCCESS(GetAvailableCameras(&numCameras), "No camera present!");
     
-    DEB_TRACE() << "Found "<< numCameras << " camera" << ((numCameras>1)? "s": "");
-    DEB_TRACE() << "Try to set current camera to number " << m_camera_number;
-    
-    if (m_camera_number < numCameras && m_camera_number >=0)
-    {        
-        THROW_IF_NOT_SUCCESS(GetCameraHandle(m_camera_number, &m_camera_handle),"Cannot get camera handle");
-	THROW_IF_NOT_SUCCESS(SetCurrentCamera(m_camera_handle), "Cannot set camera handle");
-    }
-    else
-    {
-	DEB_ERROR() << "Invalid camera number " << m_camera_number << ", there is "<< numCameras << " available";
-	THROW_HW_ERROR(InvalidValue) << "Invalid Camera number ";
-    }
+    THROW_IF_NOT_SUCCESS(FLIOpen(&m_device, (char *)camera_path.c_str(), FLIDOMAIN_USB|FLIDEVICE_CAMERA),
+			 "Cannot open FLI camera as " << DEB_VAR1(camera_path));
 
+    long tmp1, tmp2, tmp3, tmp4, img_rows, row_width;
+    double d1, d2;
+    const int buff_size = 1024;
+    char buff[buff_size];
+    // --- Get Camera model, and other ident info
+    THROW_IF_NOT_SUCCESS(FLIGetModel(m_device, buff, buff_size), "Cannot get camera model ");    
+    m_detector_model = buff;
+    THROW_IF_NOT_SUCCESS(FLIGetSerialString(m_device, buff, buff_size), "Cannot get camera serial # ");        
+    m_detector_serial = buff;
+    THROW_IF_NOT_SUCCESS(FLIGetHWRevision(m_device, &m_detector_hw_rev), "Cannot get camera HW revision ");
+    THROW_IF_NOT_SUCCESS(FLIGetFWRevision(m_device, &m_detector_fw_rev), "Cannot get camera FW revision ");
+    THROW_IF_NOT_SUCCESS(FLIGetPixelSize(m_device, &(m_pixel_size.first), &(m_pixel_size.second)), "Cannot get camera pixel size ");
+    THROW_IF_NOT_SUCCESS(FLIGetArrayArea(m_device, (long*)&(m_array_area.first.x), (long*)&(m_array_area.first.y),
+					 (long*)&(m_array_area.second.x), (long*)&(m_array_area.second.y)), "Cannot get camera array area ");
+    THROW_IF_NOT_SUCCESS(FLIGetVisibleArea(m_device,  (long*)&(m_visible_area.first.x),  (long*)&(m_visible_area.first.y),
+					    (long*)&(m_visible_area.second.x),  (long*)&(m_visible_area.second.y)), "Cannot get camera visible area ");
+    
+    DEB_ALWAYS() << "Fli Camera device found on path " << camera_path << ":\n" 
+		 << "    * Model    : " << m_detector_model << "\n"
+		 << "    * Serial # : " << m_detector_serial << "\n"
+		 << "    * HW & FW rev.: " <<  m_detector_hw_rev << ", " << m_detector_fw_rev << "\n"
+		 << "    * Array area : (" << m_array_area.first << ", " << m_array_area.second << ")\n"
+		 << "    * Array visible : (" << m_visible_area.first << ", " << m_visible_area.second << ")\n";
+    
+    m_bin_max = Bin(16, 16);   
 
-    // --- Initialize  the library    
-    THROW_IF_NOT_SUCCESS(Initialize((char *)m_config_path.c_str()), "Library initialization failed, check the config. path");
+    // --- set bin, roi and depth for default, there is no way to read back them with sdk function
+    // --- so use caches
+    THROW_IF_NOT_SUCCESS(FLISetHBin(m_device, 1),"Cannot set HBin to 1 ");
+    THROW_IF_NOT_SUCCESS(FLISetVBin(m_device, 1),"Cannot set VBin to 1 ");
+    m_bin = Bin(1,1);
+    THROW_IF_NOT_SUCCESS(FLISetImageArea(m_device, 0, 0, (long)m_array_area.second.x, (long)m_array_area.second.y),"Cannot set image area ");
+    m_roi = Roi(Point(0,0), m_array_area.second);
+    // command not supported supposed here all the cameras are 16bit
+    // THROW_IF_NOT_SUCCESS(FLISetBitDepth(m_device, FLI_MODE_16BIT),"Cannot set bit depth to 8bit ");
+    m_bit_depth = FLI_MODE_16BIT;
     
-    // --- Get Camera model
-    char	model[AT_CONTROLLER_CARD_MODEL_LEN];
-    int         serial;
-    THROW_IF_NOT_SUCCESS(GetHeadModel(model), "Cannot get camera model");
-    THROW_IF_NOT_SUCCESS(GetCameraSerialNumber(&serial), "Cannot get camera serial number");
+    // --- set shutter mode to manual close
+    THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device, FLI_SHUTTER_CLOSE),"Cannot close shutter ");
 
-    m_detector_model = model;
-    m_detector_serial = serial;
-    m_detector_type = m_andor_type_maps[m_camera_capabilities.ulCameraType];
-    
-    DEB_TRACE() << "Fli Camera device found:\n" 
-		<< "    * Type     : " << m_detector_type << "("
-		<< m_camera_capabilities.ulCameraType <<")\n"
-		<< "    * Model    : " << m_detector_model <<"\n"
-		<< "    * Serial # : " << m_detector_serial;
-
-    
-    // --- Initialise deeper parameters of the controller                
-    initialiseController();            
-
-    // Fan off, HighCapacity mode and Baseline clamping off as default if supported
-    if (m_camera_capabilities.ulSetFunctions & AC_SETFUNCTION_HIGHCAPACITY)
-      setHighCapacity(HIGH_CAPACITY);
-    if (m_camera_capabilities.ulFeatures & AC_FEATURES_FANCONTROL)
-      setFanMode(FAN_OFF);
-    if (m_camera_capabilities.ulSetFunctions & AC_SETFUNCTION_BASELINECLAMP)
-      setBaselineClamp(BLCLAMP_DISABLED);
-
-    //--- Set detector for single image acquisition and get max binning
-    m_read_mode = 4;
-    THROW_IF_NOT_SUCCESS(SetReadMode(m_read_mode), "Cannot camera read mode");
- 
-    int xbin_max, ybin_max;   
-    THROW_IF_NOT_SUCCESS(GetMaximumBinning(m_read_mode, 0, &xbin_max), "Cannot get the horizontal maximum binning");
-    THROW_IF_NOT_SUCCESS(GetMaximumBinning(m_read_mode, 1, &ybin_max), "Cannot get the vertical maximum binning");
-
-    m_bin_max = Bin(xbin_max, ybin_max);   
-    DEB_TRACE() << "Maximum binning : " << xbin_max << " x " << ybin_max;                   
-
-    // --- set default ROI because there is no way to read bck th image size
-    // --- BIN already set to 1,1 above.
-    // --- Fli sets the ROI by starting coordinates at 1 and not 0 !!!!
-    Size sizeMax;
-    getDetectorImageSize(sizeMax);
-    Roi aRoi = Roi(0,0, sizeMax.getWidth(), sizeMax.getHeight());    
-    
-    // --- setRoi applies both bin and roi
-    DEB_TRACE() << "Set the ROI to full frame: "<< aRoi;
-    setRoi(aRoi);
-    
-    
-    // --- Get the maximum exposure time allowed and set default
-    THROW_IF_NOT_SUCCESS(GetMaximumExposure(&m_exp_time_max), "Cannot get the maximum exposure time");
-    DEB_TRACE() << "Maximum exposure time : "<< m_exp_time_max << "sec.";
-    
-    setExpTime(m_exp_time);
-    
-    // --- Set detector for software single image mode    
-    m_trig_mode_maps[IntTrig] = 0;
-    m_trig_mode_maps[ExtTrigMult] = 1;
-    m_trig_mode_maps[ExtTrigSingle] = 6;
-    m_trig_mode_maps[ExtGate] = 7;
-    m_trig_mode_maps[IntTrigMult] = 10;  
-    setTrigMode(IntTrig);
-    
-    // --- Set the Fli specific acquistion mode.
-    // --- We set acquisition mode to run-till-abort 
-    m_acq_mode = 5; //Run Till Abort
-    m_nb_frames = 1;
-    THROW_IF_NOT_SUCCESS(SetAcquisitionMode(m_acq_mode), "Cannot set the acquisition mode");
-     // --- set shutter mode to FRAME
-    setShutterMode(FRAME);        
+    // --- set image mode to exposure vs. background
+    THROW_IF_NOT_SUCCESS(FLISetFrameType(m_device, FLI_FRAME_TYPE_NORMAL),"Cannot close shutter ");
     
     // --- finally start the acq thread
-    m_acq_thread = new _AcqThread(*this);
-    m_acq_thread->start();
+    m_thread.start();
 }
 
 //---------------------------
@@ -187,24 +254,10 @@ Camera::~Camera()
 {
     DEB_DESTRUCTOR();
     // Stop Acq thread
-    delete m_acq_thread;
-    m_acq_thread = NULL;
-                
+    stopAcq();
     // Close camera
-    if (m_cooler)
-    {
-	DEB_ERROR() <<"Please stop the cooling before shuting dowm the camera\n"                             
-		    << "brutale heating could damage the sensor.\n"
-		    << "And wait until temperature rises above 5 deg, before shuting down.";
-
-	THROW_HW_ERROR(Error)<<"Please stop the cooling before shuting dowm the camera\n"                             
-			     << "brutale heating could damage the sensor.\n"
-			     << "And wait until temperature rises above 5 deg, before shuting down.";
-    }
-    
-    DEB_TRACE() << "Shutdown camera";
-    ShutDown();
-    m_camera_handle = 0;
+    if(m_device != FLI_INVALID_DEVICE)
+	FLIClose(m_device);
 }
 
 //---------------------------
@@ -213,9 +266,7 @@ Camera::~Camera()
 void Camera::prepareAcq()
 {
     DEB_MEMBER_FUNCT();
-    m_image_number=0;
-    
-    THROW_IF_NOT_SUCCESS(PrepareAcquisition(), "Cannot prepare acquisition");
+    m_acq_frame_nb=0;    
 }
 //---------------------------
 // @brief  start the acquistion
@@ -224,37 +275,10 @@ void Camera::startAcq()
 {
     DEB_MEMBER_FUNCT();
         
-    // --- check first the acquisition is idle
-    int status;
-    THROW_IF_NOT_SUCCESS(GetStatus(&status), "Cannot get status");
-    if (status != DRV_IDLE)
-    {
-        _setStatus(Camera::Fault,false);        
-        THROW_HW_ERROR(Error) << "Cannot start acquisition, camera is not idle";            
-    }   
+    m_thread.m_force_stop = false;
     
-    // --- Don't forget to request the maximum number of images the circular buffer can store
-    // --- based on the current acquisition settings.
-    THROW_IF_NOT_SUCCESS(GetSizeOfCircularBuffer(&m_ring_buffer_size), "Cannot get size of circular buffer");
-
-    DEB_TRACE() << "Fli Circular buffer size = " << m_ring_buffer_size << " images";
-            
-    // Wait running stat of acquisition thread
-    AutoMutex aLock(m_cond.mutex());
-    m_wait_flag = false;
-    m_cond.broadcast();
-    while(!m_thread_running)
-        m_cond.wait();
-       
-    if(m_image_number == 0)
-    {
-        StdBufferCbMgr& buffer_mgr = m_buffer_ctrl_obj.getBuffer();
-	buffer_mgr.setStartTimestamp(Timestamp::now());
-	THROW_IF_NOT_SUCCESS(StartAcquisition(), "Cannot start acquisition");
-    }
-    if (m_trig_mode == IntTrigMult)
-      THROW_IF_NOT_SUCCESS(SendSoftwareTrigger(), "Cannot start acquisition");
-
+    m_thread.sendCmd(CameraThread::StartAcq);
+    m_thread.waitNotStatus(CameraThread::Ready);
 }
 
 //---------------------------
@@ -262,172 +286,14 @@ void Camera::startAcq()
 //---------------------------
 void Camera::stopAcq()
 {
-    _stopAcq(false);
-}
-
-//---------------------------
-// @brief private method
-//---------------------------
-void Camera::_stopAcq(bool internalFlag)
-{
     DEB_MEMBER_FUNCT();
-
-    AutoMutex aLock(m_cond.mutex());
-    if(m_status != Camera::Ready)
-    {
-        while(!internalFlag && m_thread_running)
-        {
-	    // signal the acq. thread to stop acquiring and to return the wait state
-            m_wait_flag = true;
-
-	    // Thread is maybe waiting for the Fli acq. event
-	    THROW_IF_NOT_SUCCESS(CancelWait(), "CancelWait() failed");
-            m_cond.wait();
-        }
-	aLock.unlock();
-
-        //Let the acq thread stop the acquisition
-        if(!internalFlag) return;
-            
-        // Stop acquisition
-        DEB_TRACE() << "Stop acquisition";
-        THROW_IF_NOT_SUCCESS(AbortAcquisition(), "Cannot abort acquisition");
-        _setStatus(Camera::Ready,false);    
-    }
-}
-//---------------------------
-// @brief the thread function for acquisition
-//---------------------------
-void Camera::_AcqThread::threadFunction()
-{
-    DEB_MEMBER_FUNCT();
-    AutoMutex aLock(m_cam.m_cond.mutex());
-    StdBufferCbMgr& buffer_mgr = m_cam.m_buffer_ctrl_obj.getBuffer();
-
-    while(!m_cam.m_quit)
-    {
-        while(m_cam.m_wait_flag && !m_cam.m_quit)
-        {
-            DEB_TRACE() << "Wait";
-            m_cam.m_thread_running = false;
-            m_cam.m_cond.broadcast();
-            m_cam.m_cond.wait();
-        }
-        DEB_TRACE() << "Run";
-        m_cam.m_thread_running = true;
-        if(m_cam.m_quit) return;
+    m_thread.m_force_stop = true;
     
-        m_cam.m_status = Camera::Exposure;
-        m_cam.m_cond.broadcast();
-        aLock.unlock();
+    m_thread.sendCmd(CameraThread::StopAcq);
+    m_thread.waitStatus(CameraThread::Ready);
 
-        bool continueAcq = true;
-	
-#if defined(WIN32)
-	long first = 0, last = 0, prev_last = 0;		
-	long validfirst, validlast;
-#else
-	int first = 0, last = 0, prev_last = 0;
-	int validfirst, validlast;	
-#endif	
-	FrameDim frame_dim = buffer_mgr.getFrameDim();
-	Size  frame_size = frame_dim.getSize();
-	int size = frame_size.getWidth() * frame_size.getHeight();
-	int ret;
-
-        while(continueAcq && (!m_cam.m_nb_frames || m_cam.m_image_number < m_cam.m_nb_frames))
-        {
-	    // Check first if acq. has been stopped
-	    if (m_cam.m_wait_flag) 
-	    {
-		continueAcq = false;
-		continue;
-	    }
-	    // Wait for an "acquisition" event, and use less cpu resources, in kinetic mode (multiframe)
-            // an event is generated for each new image
-	    if ((ret = WaitForAcquisition()) != DRV_SUCCESS)
-	    {
-		// If CancelWait() or acq. not started yet
-		if(ret == DRV_NO_NEW_DATA) continue;
-		else 
-		{
-		  DEB_ERROR() << "WaitForAcquisition() failed" << " : error code = " << error_code(ret);
-		    THROW_HW_ERROR(Error) << "WaitForAcquisition() failed";
-		}
-	    }
-
-            // --- Get the available images in cicular buffer            
-            prev_last = last;
-            if ((ret = GetNumberNewImages(&first, &last)) != DRV_SUCCESS)
-            {
-                if (ret == DRV_NO_NEW_DATA) continue;
-                else
-                {
-		  DEB_ERROR() << "Cannot get number of new images" << " : error code = " << error_code(ret);
-                    THROW_HW_ERROR(Error) << "Cannot get number of new images";
-                }
-            }        
-            DEB_TRACE() << "Available images: first = " << first << " last = " << last;
-            // Check if we lose an image
-	    if(first != prev_last +1 )
-	    {
-		m_cam._setStatus(Camera::Fault,false);
-		continueAcq = false;
-		DEB_ERROR() << "Lost image(s) from " << prev_last << "to "<< first-1;
-		THROW_HW_ERROR(Error) << "Lost image(s) from " << prev_last << "to "<< first-1;	
-	    }
-            // --- Images are available, process images
-            m_cam._setStatus(Camera::Readout,false);
-	    
-            for (long im=first; im <= last; im++)
-            {
-                DEB_TRACE()  << "image #" << m_cam.m_image_number <<" acquired !";
-                // ---  must get image one by one to copy to the buffer manager
-                void *ptr = buffer_mgr.getFrameBufferPtr(m_cam.m_image_number);
-                
-                if ((ret=GetImages16(im, im,(unsigned short*) ptr, (unsigned long)size,&validfirst, &validlast))!= DRV_SUCCESS)
-                {
-                    m_cam._setStatus(Camera::Fault,false);
-                    continueAcq = false;
-                    DEB_TRACE() << "size = " << size;
-                    DEB_ERROR() << "Cannot get image #" << im << " : error code = " << error_code(ret);
-                    THROW_HW_ERROR(Error) << "Cannot get last image";                
-                }
-                HwFrameInfoType frame_info;
-                frame_info.acq_frame_nb = m_cam.m_image_number;
-                continueAcq = buffer_mgr.newFrameReady(frame_info);
-                DEB_TRACE() << DEB_VAR1(continueAcq);
-                ++m_cam.m_image_number;
-            }
-        }
-
-        m_cam._stopAcq(true);
-
-        aLock.lock();
-        m_cam.m_wait_flag = true;
-    }
 }
 
-//-----------------------------------------------------
-// @brief the acquisition thread Ctor
-//-----------------------------------------------------
-Camera::_AcqThread::_AcqThread(Camera &aCam) :
-    m_cam(aCam)
-{
-    pthread_attr_setscope(&m_thread_attr,PTHREAD_SCOPE_PROCESS);
-}
-//-----------------------------------------------------
-// @brief the acquisition thread Dtor
-//-----------------------------------------------------
-Camera::_AcqThread::~_AcqThread()
-{
-    AutoMutex aLock(m_cam.m_cond.mutex());
-    m_cam.m_quit = true;
-    m_cam.m_cond.broadcast();
-    aLock.unlock();
-    
-    join();
-}
 
 //-----------------------------------------------------
 // brief return the detector image size 
@@ -437,9 +303,8 @@ void Camera::getDetectorImageSize(Size& size)
     DEB_MEMBER_FUNCT();
     int xmax, ymax;
     
-    // --- Get the max image size of the detector
-    THROW_IF_NOT_SUCCESS(GetDetector(&xmax, &ymax), "Cannot get detector size");
-    size= Size(xmax, ymax);
+    // --- Suppose to return the max image size here, already taken by contructor
+    size= Size(m_array_area.second.x, m_array_area.second.y);
 }
 
 
@@ -450,26 +315,9 @@ void Camera::getImageType(ImageType& type)
 {
     DEB_MEMBER_FUNCT();
     int bits;
-    // --- Get the AD channel dynamic range in bits per pixel
-    // --- suppose here channel 0 is set, in fact we do not provide any
-    // --- command to select a different ADC if the detector has several.
-
     
-    THROW_IF_NOT_SUCCESS(GetBitDepth(m_adc_speeds[m_adc_speed_index].adc, &bits), "Cannot get detector bit depth");
-    // --- not clear from documentation with bit depth are possible
-    // --- according to the FliCapabilites structure cameras can support more image type
-    // --- with color ones as well.
- 
- 
-    if (bits <=8) type = Bpp8;
-    else if (bits <=16) type = Bpp16;
-    else type = Bpp32;
-       
-    // --- previous code do not return the data image type.
-    // --- can either be bpp16 or bpp32, just depends on the function used
-    // --- to read the image (GetImages()- 32bpp, GetImage16() - 16bpp
-    // ---  will later on add support for 32bpp if requested.
-
+    if (m_bit_depth == FLI_MODE_8BIT) type = Bpp8;
+    else if (m_bit_depth == FLI_MODE_16BIT) type = Bpp16;
 }
 
 //-----------------------------------------------------
@@ -478,9 +326,16 @@ void Camera::getImageType(ImageType& type)
 void Camera::setImageType(ImageType type)
 {
     DEB_MEMBER_FUNCT();
-    // --- see above for future immprovement
-    return;
+    switch (type)
+    {
+    case Bpp8: m_bit_depth = FLI_MODE_8BIT; break;
+    case Bpp16: m_bit_depth = FLI_MODE_16BIT; break;
+    default: THROW_HW_ERROR(InvalidValue) << DEB_VAR1(type);
+    }
+    
+    THROW_IF_NOT_SUCCESS(FLISetBitDepth(m_device, m_bit_depth), "cannot set bit depth");   
 }
+
 //-----------------------------------------------------
 // @brief return the detector type
 //-----------------------------------------------------
@@ -522,32 +377,13 @@ bool Camera::checkTrigMode(TrigMode trig_mode)
     bool valid_mode; 
     int ret;
 
-
-
     switch (trig_mode)
     {       
     case IntTrig:
     case IntTrigMult:
-    case ExtTrigSingle:
     case ExtTrigMult:
-    case ExtGate:
-	ret = IsTriggerModeAvailable(m_trig_mode_maps[trig_mode]);
-	switch (ret)
-	{
-	case DRV_SUCCESS:
-	    valid_mode = true;
-	    break;
-	case DRV_INVALID_MODE:
-	    valid_mode = false;
-	    break;
-	case DRV_NOT_INITIALIZED:                
-	    valid_mode = false;
-	    DEB_ERROR() << "System not initializsed, cannot get trigger mode status" << " : error code = " << error_code(ret);
-	    THROW_HW_ERROR(Error) << "System not initializsed, cannot get trigger mode status";
-	    break;                                                     
-	}                
-        break;
-
+	valid_mode = true;
+	break;
     default:
 	valid_mode = false;
         break;
@@ -562,7 +398,6 @@ void Camera::setTrigMode(TrigMode mode)
     DEB_MEMBER_FUNCT();
     DEB_PARAM() << DEB_VAR1(mode);
 
-    THROW_IF_NOT_SUCCESS(SetTriggerMode(m_trig_mode_maps[mode]), "Cannot set trigger mode");
     m_trig_mode = mode;    
 }
 
@@ -585,9 +420,10 @@ void Camera::setExpTime(double exp_time)
 {
     DEB_MEMBER_FUNCT();
     DEB_PARAM() << DEB_VAR1(exp_time);
-    
-    THROW_IF_NOT_SUCCESS(SetExposureTime((float)exp_time), "Cannot set exposure time");
-    m_exp_time = exp_time;
+    // --- in millisecond
+    long exptime = (long) (exp_time*1000);
+    THROW_IF_NOT_SUCCESS(FLISetExposureTime(m_device, exptime), "Cannot set exposure time");
+    m_exp_time = (double) (exptime/1000);
 }
 
 //-----------------------------------------------------
@@ -596,16 +432,9 @@ void Camera::setExpTime(double exp_time)
 void Camera::getExpTime(double& exp_time)
 {
     DEB_MEMBER_FUNCT();
-    float exp, acc, kin;
+
     
-    // --- because Fli can adjust the exposure time
-    // --- need to hw read the acquisition timings here.
-    // --- kin time is the kinetic (multi-frame) time between two frames
-    THROW_IF_NOT_SUCCESS(GetAcquisitionTimings(&exp, &acc, &kin),  "Cannot get acquisition timings");
-    m_exp_time = exp;
-    m_kin_time = kin;
-    
-    exp_time = (double) exp;
+    exp_time = (double) m_exp_time;
     
     DEB_RETURN() << DEB_VAR1(exp_time);
 }
@@ -617,15 +446,7 @@ void Camera::setLatTime(double lat_time)
 {
     DEB_MEMBER_FUNCT();
     DEB_PARAM() << DEB_VAR1(lat_time);
-    float exp, acc, kin;
-        
-    // --- Changing the latency time changes the kinetic cycle time
-    // --- need to read back the timings which can differ from the set values.
-    
-    THROW_IF_NOT_SUCCESS(GetAcquisitionTimings(&exp, &acc, &kin), "Cannot get acquisition timings");
-    m_exp_time = exp;
-    m_kin_time = exp + lat_time;
-    THROW_IF_NOT_SUCCESS(SetKineticCycleTime(m_kin_time), "Cannot set kinetic cycle time");
+  
     m_latency_time = lat_time;
     
 }
@@ -636,20 +457,7 @@ void Camera::setLatTime(double lat_time)
 void Camera::getLatTime(double& lat_time)
 {
     DEB_MEMBER_FUNCT();
-    // --- we do calculate the latency by using the kinetic cycle time (time between 2 frames)
-    // --- minus the exposure time
-    float exp, acc, kin;
-    
-    // --- because Fli can adjust the exposure time
-    // --- need to hw read the acquisition timings here.
-    // --- kin time is the kinetic (multi-frame) time between two frames
-    // --- we do not know with andor how much is the readout time !!!!
-    THROW_IF_NOT_SUCCESS(GetAcquisitionTimings(&exp, &acc, &kin), "Cannot get acquisition timings");
-    m_exp_time = exp;
-    m_kin_time = kin;
-    
-    lat_time = kin - exp;
-    
+    lat_time = m_latency_time;
     DEB_RETURN() << DEB_VAR1(lat_time);
 }
 
@@ -661,7 +469,7 @@ void Camera::getExposureTimeRange(double& min_expo, double& max_expo) const
     DEB_MEMBER_FUNCT();
     
     min_expo = 0.;    
-    max_expo = (double) m_exp_time_max;
+    max_expo = (double) 1e6;
  
     DEB_RETURN() << DEB_VAR2(min_expo, max_expo);
 }
@@ -677,7 +485,7 @@ void Camera::getLatTimeRange(double& min_lat, double& max_lat) const
     min_lat = 0.;       
     
     // --- do not know how to get the max_lat, fix it as the max exposure time
-    max_lat = (double) m_exp_time_max;
+    max_lat = (double) 1e6;
 
     DEB_RETURN() << DEB_VAR2(min_lat, max_lat);
 }
@@ -689,15 +497,7 @@ void Camera::setNbFrames(int nb_frames)
 {
     DEB_MEMBER_FUNCT();
     DEB_PARAM() << DEB_VAR1(nb_frames);
-    // --- Hoops continuous mode not yet supported    
-    //    if (nb_frames == 0)
-    //    {
-    //        DEB_ERROR() << "Sorry continuous acquisition (setNbFrames(0)) not yet implemented";
-    //        THROW_HW_ERROR(Error) << "Sorry continuous acquisition (setNbFrames(0)) not yet implemented";                
-    //    }
-    //    // --- We only work on kinetics mode which allow multi-frames to be taken
-    //    // ---
-    //    THROW_IF_NOT_SUCCESS(SetNumberKinetics(nb_frames), "Cannot set number of frames");
+ 
     m_nb_frames = nb_frames;
 }
 
@@ -717,7 +517,7 @@ void Camera::getNbFrames(int& nb_frames)
 void Camera::getNbHwAcquiredFrames(int &nb_acq_frames)
 { 
     DEB_MEMBER_FUNCT();    
-    nb_acq_frames = m_image_number;
+    nb_acq_frames = m_acq_frame_nb;
 }
   
 //-----------------------------------------------------
@@ -726,28 +526,27 @@ void Camera::getNbHwAcquiredFrames(int &nb_acq_frames)
 void Camera::getStatus(Camera::Status& status)
 {
     DEB_MEMBER_FUNCT();
-    AutoMutex aLock(m_cond.mutex());
-    status = m_status;
-    //Check if the camera is not waiting for soft. trigger
-    if (status == Camera::Readout && 
-	m_trig_mode == IntTrigMult)
-      {
-	status = Camera::Ready;
-      }
+    int thread_status = m_thread.getStatus();
+    
+    DEB_RETURN() << DEB_VAR1(thread_status);
+	
+    switch (thread_status)
+    {
+    case CameraThread::Ready:
+	status = Camera::Ready; break;
+    case CameraThread::Exposure: break;
+	status =  Camera::Exposure; break;
+    case CameraThread::Readout: break;
+	status = Camera::Readout; break;
+    case CameraThread::Latency: break;
+	status =  Camera::Latency; break;
+    default:
+	throw LIMA_HW_EXC(Error, "Invalid thread status");
+    }
+    
     DEB_RETURN() << DEB_VAR1(DEB_HEX(status));
 }
 
-//-----------------------------------------------------
-// @brief set the new camera status
-//-----------------------------------------------------
-void Camera::_setStatus(Camera::Status status,bool force)
-{
-    DEB_MEMBER_FUNCT();
-    AutoMutex aLock(m_cond.mutex());
-    if(force || m_status != Camera::Fault)
-        m_status = status;
-    m_cond.broadcast();
-}
 //-----------------------------------------------------
 // @brief do nothing, hw_roi = set_roi.
 //-----------------------------------------------------
@@ -770,7 +569,7 @@ void Camera::setRoi(const Roi& set_roi)
 
     Point topleft, size;
     int binx, biny;
-    int hstart, hend, vstart, vend;
+    long ul_x, ul_y, lr_x, lr_y;
     Roi hw_roi, roiMax;
     Size sizeMax;
     
@@ -796,18 +595,17 @@ void Camera::setRoi(const Roi& set_roi)
 	hw_roi = roiMax;
 	binx=1; biny=1;
     }    
-    // --- Fli sets the ROI by starting coordinates at 1 and not 0 !!!!
-    // --- Warning, SetImage() needs coodinates in full image size not with binning
+    // --- Warning, SetImageArea() needs absolute topleft point binned bottomright point
     // --- but Lima passes here image size with binning applied on
 
     topleft = hw_roi.getTopLeft(); size = hw_roi.getSize();
-    hstart = topleft.x*binx +1;          vstart = topleft.y*biny +1;
-    hend   = hstart + size.x*binx -1;    vend   = vstart + size.y*biny -1;
+    ul_x = topleft.x*binx;          ul_y = topleft.y*biny;
+    lr_x   = topleft.x + size.x;    lr_y   = topleft.y + size.y;
     
     DEB_TRACE() << "bin =  " << m_bin.getX() <<"x"<< m_bin.getY();
-    DEB_TRACE() << "roi = " << hstart << "-" << hend << ", " << vstart << "-" << vend;
+    DEB_TRACE() << "FLI roi = " << ul_x << "-" << ul_y << ", " << lr_x << "-" << lr_y;
     //- then fix the new ROI
-    THROW_IF_NOT_SUCCESS(SetImage(m_bin.getX(), m_bin.getY(), hstart, hend, vstart, vend), "Cannot set detector ROI");
+    THROW_IF_NOT_SUCCESS(FLISetImageArea(m_device,ul_x, ul_y, lr_x, lr_y), "Cannot set detector ROI");
     // cache the real ROI, used when setting BIN
     m_roi = hw_roi;
 }
@@ -849,42 +647,10 @@ void Camera::checkBin(Bin &hw_bin)
 void Camera::setBin(const Bin &set_bin)
 {
     DEB_MEMBER_FUNCT();
-    Point topleft, size;
-    
-    int binx, biny;
-    int hstart, hend, vstart, vend;
-    Roi hw_roi, roiMax;
-    Size sizeMax;
 
-    getDetectorImageSize(sizeMax);
-    roiMax = Roi(0,0, sizeMax.getWidth(), sizeMax.getHeight());
-
-    if(m_bin == set_bin) return;
-
-    // --- Warning, SetImage() needs coodinates in full image size not with binning
-    // --- but Lima passes image size with binning applied on
-    // --- so set a internal binning factor (binx/biny) for size correction.
-               
-    if(m_roi.isActive() && m_roi != roiMax) 
-    {
-	// --- a real available
-	binx = set_bin.getX();  biny = set_bin.getY();
-	hw_roi = m_roi;
-    }
-    else
-    {
-	// ---  either No roi or roi fit with max size!!!	
-	// --- in that case binning for full size calculation is 1
-	hw_roi = roiMax;
-	binx = 1; biny = 1;
-    }
-    topleft = hw_roi.getTopLeft(); size = hw_roi.getSize();
-    hstart = topleft.x*binx +1;          vstart = topleft.y*biny +1;
-    hend   = hstart + size.x*binx -1;    vend   = vstart + size.y*biny -1;
-
-    DEB_TRACE() << "bin =  " << set_bin.getX() <<"x"<< set_bin.getY();
-    DEB_TRACE() << "roi = " << hstart << "-" << hend << ", " << vstart << "-" << vend;
-    THROW_IF_NOT_SUCCESS(SetImage(set_bin.getX(), set_bin.getY(), hstart, hend, vstart, vend), "Cannot set detector BIN");
+    THROW_IF_NOT_SUCCESS(FLISetHBin(m_device, set_bin.getX()),"Cannot set HBin ");
+    THROW_IF_NOT_SUCCESS(FLISetVBin(m_device, set_bin.getY()),"Cannot set VBin ");
+   
     m_bin = set_bin;
     
     DEB_RETURN() << DEB_VAR1(set_bin);
@@ -924,9 +690,8 @@ void Camera::getPixelSize(double& sizex, double& sizey)
     DEB_MEMBER_FUNCT();
     float xsize, ysize;
     
-    THROW_IF_NOT_SUCCESS(GetPixelSize(&xsize, &ysize), "Cannot get pixel size");
-    sizex = xsize * 1e-6;
-    sizey = ysize * 1e-6;
+    sizex =  m_pixel_size.first;
+    sizey = m_pixel_size.second;
     DEB_RETURN() << DEB_VAR2(sizex, sizey); 
 }
 
@@ -950,8 +715,7 @@ void Camera::setShutterLevel(int level)
     DEB_MEMBER_FUNCT();
 
     DEB_TRACE() << "Camera::setShutterLevel - " << DEB_VAR1(level);		
-    THROW_IF_NOT_SUCCESS(SetShutter(level, m_shutter_mode, m_shutter_close_time, m_shutter_open_time),  "Failed to set shutter level");
-    m_shutter_level = level;
+    m_shutter_level = (level)? FLI_SHUTTER_EXTERNAL_TRIGGER_HIGH: FLI_SHUTTER_EXTERNAL_TRIGGER_LOW;
 }
 
 //-----------------------------------------------------
@@ -962,7 +726,7 @@ void Camera::setShutterLevel(int level)
 void Camera::getShutterLevel(int& level)
 {
     DEB_MEMBER_FUNCT();
-    level = m_shutter_level;    
+    level = (m_shutter_level==FLI_SHUTTER_EXTERNAL_TRIGGER_HIGH)?1:0;    
 }
 
 
@@ -976,13 +740,14 @@ void Camera::setShutterMode(ShutterMode mode)
     DEB_MEMBER_FUNCT();
     // --- SetShutter() param mode is both used to set  auto or manual mode and to open and close
     // --- 0 - Auto, 1 - Open, 2 - Close	
-    int aMode = (mode == FRAME)? 0:2;
-	DEB_TRACE() << "Camera::setShutterMode - " << DEB_VAR1(aMode)
-                <<" - Close Time  = "<<m_shutter_close_time
-                <<" - Open Time  = "<<m_shutter_open_time;		
-    if (mode == FRAME)
+    DEB_TRACE() << "Camera::setShutterMode - " << DEB_VAR1(mode);
+    if (mode == ShutterAutoFrame)
     {    
-        THROW_IF_NOT_SUCCESS(SetShutter(m_shutter_level, aMode, m_shutter_close_time, m_shutter_open_time), "Failed to set the shutter mode");
+        THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device, m_shutter_level), "Failed to set the shutter mode");
+    }
+    else
+    {
+	THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device, FLI_SHUTTER_CLOSE), "Failed to set the shutter mode");	
     }
     m_shutter_mode = mode;
 }
@@ -1009,11 +774,9 @@ void Camera::setShutter(bool flag)
     DEB_MEMBER_FUNCT();
     // --- SetShutter() param mode is both used to set in auto or manual mode and to open and close
     // --- 0 - Auto, 1 - Open, 2 - Close
-    int aMode = (flag)? 1:2; 
-    DEB_TRACE() << "Camera::setShutter - " << DEB_VAR1(aMode)
-                <<" - Close Time  = "<<m_shutter_close_time
-                <<" - Open Time  = "<<m_shutter_open_time;			
-    THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device``````, "Failed close/open the shutter");
+    flishutter_t aMode = (flag)? FLI_SHUTTER_OPEN:FLI_SHUTTER_CLOSE; 
+    DEB_TRACE() << "Camera::setShutter - " << DEB_VAR1(aMode);
+    THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device, aMode), "Failed close/open the shutter");
     m_shutter_state = flag;
 }
 
@@ -1031,13 +794,17 @@ void Camera::getShutter(bool& flag)
 
 //-----------------------------------------------------
 // @brief	set the temperature
-// @param	temperature in centigrade
+// @param	temperature in centigrade -55 to 45 C
 //
 //-----------------------------------------------------
-void Camera::setTemperatureSP(int temp)
+void Camera::setTemperatureSP(double temp)
 {
     DEB_MEMBER_FUNCT();
-    THROW_IF_NOT_SUCCESS(SetTemperature(m_device, temp), "Failed to set temperature set-point");
+    if (temp < -55 || temp >45)
+    {
+	THROW_HW_ERROR(InvalidValue) << "Temperature SP range is -45/55 C";
+    }
+    THROW_IF_NOT_SUCCESS(FLISetTemperature(m_device, temp), "Failed to set temperature set-point");
     m_temperature_sp = temp;
 }
 
@@ -1046,10 +813,36 @@ void Camera::setTemperatureSP(int temp)
 // @param	temperature in centigrade
 //
 //-----------------------------------------------------
-void Camera::getTemperatureSP(int& temp)
+void Camera::getTemperatureSP(double& temp)
 {
     DEB_MEMBER_FUNCT();
     temp = m_temperature_sp;
+}
+
+//-----------------------------------------------------
+// @brief	return the temperature of The CCD (internal temperature)
+// @param	temperature in centigrade
+//
+//-----------------------------------------------------
+void Camera::getTemperatureCCD(double& temp)
+{
+    DEB_MEMBER_FUNCT();
+    double aTemp;
+    THROW_IF_NOT_SUCCESS(FLIReadTemperature(m_device,  FLI_TEMPERATURE_CCD, &aTemp), "Failed to get CCD temperature ");
+    temp = aTemp;
+}
+
+//-----------------------------------------------------
+// @brief	return the temperature of the base (external temperature)
+// @param	temperature in centigrade
+//
+//-----------------------------------------------------
+void Camera::getTemperatureBase(double& temp)
+{
+    DEB_MEMBER_FUNCT();
+    double aTemp;
+    THROW_IF_NOT_SUCCESS(FLIReadTemperature(m_device, FLI_TEMPERATURE_BASE, &aTemp), "Failed to get BASE temperature ");
+    temp = aTemp;
 }
 
 //-----------------------------------------------------
@@ -1057,8 +850,10 @@ void Camera::getTemperatureSP(int& temp)
 // @param	float power
 //
 //-----------------------------------------------------
-void Camera::getCoolerPower(float& power)   
+void Camera::getCoolerPower(double& power)   
 {
-    DEB_MEMBER_FUNCT();    
-    THROW_IF_NOT_SUCCESS(GetCoolerPower(m_device, power));
+    DEB_MEMBER_FUNCT();
+    double aPower;
+    THROW_IF_NOT_SUCCESS(FLIGetCoolerPower(m_device, &aPower), "Cannot read cooler power ");
+    power = aPower;
 }

@@ -83,9 +83,7 @@ void Interface::reset(ResetLevel reset_level)
     DEB_PARAM() << DEB_VAR1(reset_level);
 
     stopAcq();
-
-    m_cam._setStatus(Camera::Ready,true);
-}
+ }
 
 //-----------------------------------------------------
 // @brief do nothing
@@ -121,9 +119,9 @@ void Interface::getStatus(StatusType& status)
 {
     DEB_MEMBER_FUNCT();
     
-    Camera::Status andor_status = Camera::Ready;
-    m_cam.getStatus(andor_status);
-    switch (andor_status)
+    Camera::Status camera_status = Camera::Ready;
+    m_cam.getStatus(camera_status);
+    switch (camera_status)
     {
     case Camera::Ready:
 	status.acq = AcqReady;
@@ -160,24 +158,4 @@ int Interface::getNbHwAcquiredFrames()
      int acq_frames;
      m_cam.getNbHwAcquiredFrames(acq_frames);
      return acq_frames;
-}
-
-//-----------------------------------------------------
-// @brief	Sets the FAN mode
-// @param	mode    mode to set
-//
-//-----------------------------------------------------
-void Interface::setFanMode(FanMode mode)
-{
-    m_cam.setFanMode(mode);
-}
-
-//-----------------------------------------------------
-// @brief	Gets the Fan mode
-// @param	mode    mode to set
-//
-//-----------------------------------------------------
-void Interface::getFanMode(FanMode& mode)
-{
-    m_cam.getFanMode(mode);
 }

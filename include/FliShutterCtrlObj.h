@@ -52,6 +52,11 @@ namespace lima
 	    virtual void setState(bool  shut_open);
 	    virtual void getState(bool& shut_open) const;
 
+            virtual void setOpenTime (double  shut_open_time);
+            virtual void getOpenTime (double& shut_open_time) const;
+            virtual void setCloseTime(double  shut_close_time);
+            virtual void getCloseTime(double& shut_close_time) const;
+
 	private:
 	    Camera& m_cam;
 	};

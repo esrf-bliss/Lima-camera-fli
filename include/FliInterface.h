@@ -36,8 +36,6 @@ namespace lima
 {
     namespace Fli
     {
-	class Interface;
-
 /*******************************************************************
  * \class Interface
  * \brief Fli hardware interface
@@ -61,8 +59,14 @@ namespace lima
 	    virtual int     getNbHwAcquiredFrames();
 
 	    // - From FliCamera
-	    void setFanMode(FanMode mode);
-	    void getFanMode(FanMode& mode);
+	    void setTemperatureSP(double temperature){m_cam.setTemperatureSP(temperature);};
+	    void getTemperatureSP(double& temperature){m_cam.getTemperatureSP(temperature);};
+	    void getTemperatureCCD (double& temperature){m_cam.getTemperatureCCD(temperature);};
+	    void getTemperatureBase (double& temperature){m_cam.getTemperatureBase(temperature);};
+	    void getCoolerPower(double& power){m_cam.getCoolerPower(power);};
+	    void setShutterLevel(int level) {m_cam.setShutterLevel(level);}
+	    void getShutterLevel(int& level) {m_cam.getShutterLevel(level);}
+	    
 	    Camera& getCamera() { return m_cam;}
 
 	private:
