@@ -136,14 +136,8 @@ namespace lima
 	    void getTemperatureCCD (double& temperature);
 	    void getTemperatureBase (double& temperature);
 	    void getCoolerPower(double& power);
-	    void setShutterLevel(int level);
-	    void getShutterLevel(int& level);
-	    //void getIOPort(long& ioport);
-	    //void setIOPort(long ioport);
-	    //void getIOPortDirection(long& direction);
-	    //void setIOPortDirection(long direction);
-	    
-
+	    void setExtTriggerLevel(int level);
+	    void getExtTriggerLevel(int& level);
 	private:
 	    class CameraThread: public CmdThread
 	    {
@@ -162,6 +156,7 @@ namespace lima
 	      CameraThread(Camera& cam);	      
 	      virtual void start();
 	      bool m_force_stop;
+	      int  m_acq_frame_nb;
 	      
 	    protected:	      
 	      virtual void init();
@@ -188,7 +183,6 @@ namespace lima
 	    Bin                         m_bin;
 	    Bin                         m_bin_max;
 	    TrigMode                    m_trig_mode;
-	    int                         m_acq_frame_nb;
 	    ShutterMode                 m_shutter_mode;
 	    bool                        m_shutter_state;
         
@@ -206,7 +200,7 @@ namespace lima
 	    //- Fli SDK stuff
 	    flidev_t                    m_device;
 	    flibitdepth_t               m_bit_depth;
-	    flishutter_t                m_shutter_level;
+	    flishutter_t                m_ext_trigger_level;
 	    double                      m_temperature_sp;
 
 	};

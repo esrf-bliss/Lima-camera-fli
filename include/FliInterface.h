@@ -64,8 +64,8 @@ namespace lima
 	    void getTemperatureCCD (double& temperature){m_cam.getTemperatureCCD(temperature);};
 	    void getTemperatureBase (double& temperature){m_cam.getTemperatureBase(temperature);};
 	    void getCoolerPower(double& power){m_cam.getCoolerPower(power);};
-	    void setShutterLevel(int level) {m_cam.setShutterLevel(level);}
-	    void getShutterLevel(int& level) {m_cam.getShutterLevel(level);}
+	    void setExtTriggerLevel(int level) {m_cam.setExtTriggerLevel(level);}
+	    void getExtTriggerLevel(int& level) {m_cam.getExtTriggerLevel(level);}
 	    
 	    Camera& getCamera() { return m_cam;}
 

@@ -3,3 +3,6 @@
 *.swp
 *target*
 test/build/
+sdk/libfli-1.104/*.o
+sdk/libfli-1.104/*.so
+sdk/libfli-1.104/*.a

@@ -78,8 +78,8 @@ namespace Fli
     void getTemperatureCCD (double& temperature /Out/);
     void getTemperatureBase (double& temperature /Out/);
     void getCoolerPower(double& power /Out/);
-    void setShutterLevel(int level);
-    void getShutterLevel(int& level /Out/);
+    void setExtTriggerLevel(int level);
+    void getExtTriggerLevel(int& level /Out/);
     
   };
 

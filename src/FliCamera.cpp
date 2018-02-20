@@ -52,7 +52,7 @@ Camera::CameraThread::CameraThread(Camera& cam)
 {
     DEB_MEMBER_FUNCT();
     DEB_TRACE() << "CameraThread::CameraThread - BEGIN";
-    m_cam->m_acq_frame_nb = 0;
+    m_acq_frame_nb = 0;
     m_force_stop = false;
     DEB_TRACE() << "CameraThread::CameraThread - END";
 }
@@ -121,62 +121,60 @@ void Camera::CameraThread::execStartAcq()
     
     StdBufferCbMgr& buffer_mgr = m_cam->m_buffer_ctrl_obj.getBuffer();
     buffer_mgr.setStartTimestamp(Timestamp::now());
-    
-    
-    int acq_frame_nb;
+        
     long remaining_exposure = 0;
     long camera_status = 0;
 
     FrameDim frame_dim = buffer_mgr.getFrameDim();
     int  frame_size = frame_dim.getMemSize();
+    // --- set number of flushes before exposing
+    THROW_IF_NOT_SUCCESS(FLISetNFlushes(m_cam->m_device, 1), "Cannot flush background");    
+    // --- start acquisition, try with video mode
+    THROW_IF_NOT_SUCCESS(FLIStartVideoMode(m_cam->m_device), "Cannot start video acquisition");
+
+    // simulate here the IntTrigMult
+    int nb_frames = m_cam->m_trig_mode != IntTrigMult ? m_cam->m_nb_frames : m_acq_frame_nb + 1;
+    int& frame_nb = m_acq_frame_nb;
     
-    // -- start acquisition, try with video mode
-    THROW_IF_NOT_SUCCESS(FLIStartVideoMode(m_cam->m_device), "Cannot start video acquisition ");
-
-    m_cam->m_acq_frame_nb = 0;
-    acq_frame_nb = 0;
-
-    bool continueAcq = true;
-    while(continueAcq && (!m_cam->m_nb_frames || m_cam->m_acq_frame_nb < m_cam->m_nb_frames))
+    for(;nb_frames == 0 || frame_nb < nb_frames;frame_nb++)
     {
-	
+
 	// -- read a first camera status
 	READ_STATUS();
 	// -- wait for an image
 	while (!m_force_stop && !IMAGE_READY)
 	{
 	    READ_STATUS();
-	    DEB_TRACE() << DEB_VAR2(camera_status, remaining_exposure);
-	    usleep(100000);
+	    //DEB_TRACE() << DEB_VAR2(camera_status, remaining_exposure);
+	    usleep(100);
 	}
+
+	if(m_force_stop)
+	{
+	    m_force_stop = false;
+	    break;
+	}
+		
 	setStatus(Readout);	
 	buffer_mgr.setStartTimestamp(Timestamp::now());
-	void *ptr = buffer_mgr.getFrameBufferPtr(m_cam->m_acq_frame_nb);
+	void *ptr = buffer_mgr.getFrameBufferPtr(frame_nb);
 
 	THROW_IF_NOT_SUCCESS(FLIGrabVideoFrame(m_cam->m_device, ptr, (size_t)frame_size), "Cannot grab video frame ");
 	DEB_TRACE() << "Declare a new Frame Ready.";
 	HwFrameInfoType frame_info;
-	frame_info.acq_frame_nb = m_cam->m_acq_frame_nb;
+	frame_info.acq_frame_nb = frame_nb;
 	buffer_mgr.newFrameReady(frame_info);
-	
-	acq_frame_nb++;
-	m_cam->m_acq_frame_nb = acq_frame_nb;
-	    
-	
-	if(m_force_stop)
-	{
-	    continueAcq = false;
-	    m_force_stop = false;
-	    break;
-	}
 
-    } /* End while */
-
+	// --- simulate here a latency time
+	if (m_cam->m_latency_time > 0) {
+	    setStatus(Latency);
+	    usleep(long(m_cam->m_latency_time * 1e6));
+	}	
+    }
   
     // stop acquisition
     THROW_IF_NOT_SUCCESS(FLICancelExposure(m_cam->m_device), "Canot cancel exposure ");
-    
-    
+       
     setStatus(Ready);
     
     DEB_TRACE() << "CameraThread::execStartAcq - END";
@@ -192,7 +190,7 @@ Camera::Camera(const std::string& camera_path)
       m_bin(1,1),
       m_shutter_state(false),
       m_exp_time(1.),
-      m_shutter_level(FLI_SHUTTER_EXTERNAL_TRIGGER_HIGH),
+      m_ext_trigger_level(FLI_SHUTTER_EXTERNAL_TRIGGER_HIGH),
       m_detector_type("Fli")
 {
     DEB_CONSTRUCTOR();
@@ -266,7 +264,15 @@ Camera::~Camera()
 void Camera::prepareAcq()
 {
     DEB_MEMBER_FUNCT();
-    m_acq_frame_nb=0;    
+    
+    m_thread.m_acq_frame_nb = 0;
+    
+    if (m_trig_mode == ExtTrigMult) {
+	// seems we must set mask to 0x0e for setting bit0 to 0 to close shutter as well
+	THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device, m_ext_trigger_level & 0x0e), "Failed set external trigger mode");
+    } else {
+	THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device, m_shutter_state), "Failed set external trigger mode");
+    }
 }
 //---------------------------
 // @brief  start the acquistion
@@ -481,11 +487,12 @@ void Camera::getLatTimeRange(double& min_lat, double& max_lat) const
 {   
     DEB_MEMBER_FUNCT();
 
-    // --- no info on min latency
+    // --- no latency neither frame rate, so just by simulation (see CameraThread::execStartAcq() )
+
     min_lat = 0.;       
     
-    // --- do not know how to get the max_lat, fix it as the max exposure time
-    max_lat = (double) 1e6;
+    // --- 3 max. why not? 
+    max_lat = (double) 3;
 
     DEB_RETURN() << DEB_VAR2(min_lat, max_lat);
 }
@@ -517,7 +524,7 @@ void Camera::getNbFrames(int& nb_frames)
 void Camera::getNbHwAcquiredFrames(int &nb_acq_frames)
 { 
     DEB_MEMBER_FUNCT();    
-    nb_acq_frames = m_acq_frame_nb;
+    nb_acq_frames = m_thread.m_acq_frame_nb;
 }
   
 //-----------------------------------------------------
@@ -706,27 +713,28 @@ void Camera::reset()
 }
 
 //-----------------------------------------------------
-// @brief	set the shutter output level
+// @brief	set the external trigger input level
 // @param	level 0 or 1
 //
 //-----------------------------------------------------
-void Camera::setShutterLevel(int level)
+void Camera::setExtTriggerLevel(int level)
 {
     DEB_MEMBER_FUNCT();
-
-    DEB_TRACE() << "Camera::setShutterLevel - " << DEB_VAR1(level);		
-    m_shutter_level = (level)? FLI_SHUTTER_EXTERNAL_TRIGGER_HIGH: FLI_SHUTTER_EXTERNAL_TRIGGER_LOW;
+    // --- same function is used to manually open/close internal shutter and to enable external trigger for exposure
+    // --- manage both in prepareAcq() 
+    DEB_TRACE() << "Camera::setExtTriggerLevel - " << DEB_VAR1(level);		
+    m_ext_trigger_level = (level)? FLI_SHUTTER_EXTERNAL_TRIGGER_HIGH: FLI_SHUTTER_EXTERNAL_TRIGGER_LOW;
 }
 
 //-----------------------------------------------------
-// @brief	get the shutter output level
+// @brief	get the external trigger input level
 // @param	level 0 or 1
 //
 //-----------------------------------------------------
-void Camera::getShutterLevel(int& level)
+void Camera::getExtTriggerLevel(int& level)
 {
     DEB_MEMBER_FUNCT();
-    level = (m_shutter_level==FLI_SHUTTER_EXTERNAL_TRIGGER_HIGH)?1:0;    
+    level = (m_ext_trigger_level==FLI_SHUTTER_EXTERNAL_TRIGGER_HIGH)?1:0;    
 }
 
 
@@ -738,17 +746,9 @@ void Camera::getShutterLevel(int& level)
 void Camera::setShutterMode(ShutterMode mode)
 {
     DEB_MEMBER_FUNCT();
-    // --- SetShutter() param mode is both used to set  auto or manual mode and to open and close
-    // --- 0 - Auto, 1 - Open, 2 - Close	
+    // --- same function is used to manually open/close internal shutter and to enable external trigger for exposure
+    // --- manage both in prepareAcq() 
     DEB_TRACE() << "Camera::setShutterMode - " << DEB_VAR1(mode);
-    if (mode == ShutterAutoFrame)
-    {    
-        THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device, m_shutter_level), "Failed to set the shutter mode");
-    }
-    else
-    {
-	THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device, FLI_SHUTTER_CLOSE), "Failed to set the shutter mode");	
-    }
     m_shutter_mode = mode;
 }
 
@@ -772,8 +772,8 @@ void Camera::getShutterMode(ShutterMode& mode)
 void Camera::setShutter(bool flag)
 {
     DEB_MEMBER_FUNCT();
-    // --- SetShutter() param mode is both used to set in auto or manual mode and to open and close
-    // --- 0 - Auto, 1 - Open, 2 - Close
+    // --- same function is used to manually open/close internal shutter and to enable external trigger for exposure
+    // --- manage both in prepareAcq() 
     flishutter_t aMode = (flag)? FLI_SHUTTER_OPEN:FLI_SHUTTER_CLOSE; 
     DEB_TRACE() << "Camera::setShutter - " << DEB_VAR1(aMode);
     THROW_IF_NOT_SUCCESS(FLIControlShutter(m_device, aMode), "Failed close/open the shutter");
