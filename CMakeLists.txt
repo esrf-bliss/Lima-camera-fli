@@ -49,7 +49,8 @@ target_link_libraries(lima${NAME} limacore)
 target_link_libraries(lima${NAME} ${LIB_FLI})
 
 limatools_set_library_soversion(lima${NAME} "VERSION")
-install(TARGETS lima${NAME} LIBRARY DESTINATION lib)
+
+limatools_set_install_libdir(lima${NAME})
 
 if(LIMA_ENABLE_PYTHON)
   limatools_run_sip_for_camera(${NAME})
