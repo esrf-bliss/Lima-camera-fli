@@ -50,11 +50,17 @@ using namespace std;
 Camera::CameraThread::CameraThread(Camera& cam)
   : m_cam(&cam)
 {
-    DEB_MEMBER_FUNCT();
-    DEB_TRACE() << "CameraThread::CameraThread - BEGIN";
+    DEB_CONSTRUCTOR();
     m_acq_frame_nb = 0;
-    m_force_stop = false;
-    DEB_TRACE() << "CameraThread::CameraThread - END";
+}
+
+//---------------------------------------------------------------------------------------
+//! Camera::CameraThread::~CameraThread()
+//---------------------------------------------------------------------------------------
+Camera::CameraThread::~CameraThread()
+{
+    DEB_DESTRUCTOR();
+    abort();
 }
 
 //---------------------------------------------------------------------------------------
@@ -63,10 +69,8 @@ Camera::CameraThread::CameraThread(Camera& cam)
 void Camera::CameraThread::start()
 {
     DEB_MEMBER_FUNCT();
-    DEB_TRACE() << "CameraThread::start - BEGIN";
     CmdThread::start();
     waitStatus(Ready);
-    DEB_TRACE() << "CameraThread::start - END";
 }
 
 //---------------------------------------------------------------------------------------
@@ -75,9 +79,7 @@ void Camera::CameraThread::start()
 void Camera::CameraThread::init()
 {
     DEB_MEMBER_FUNCT();
-    DEB_TRACE() << "CameraThread::init - BEGIN";
     setStatus(Ready);
-    DEB_TRACE() << "CameraThread::init - END";
 }
 
 //---------------------------------------------------------------------------------------
@@ -86,17 +88,15 @@ void Camera::CameraThread::init()
 void Camera::CameraThread::execCmd(int cmd)
 {
     DEB_MEMBER_FUNCT();
-    DEB_TRACE() << "CameraThread::execCmd - BEGIN";
-    int status = getStatus();
     switch (cmd)
     {
     case StartAcq:
-	if (status != Ready)
-	    throw LIMA_HW_EXC(InvalidValue, "Not Ready to StartAcq");
 	execStartAcq();
 	break;
+    case StopAcq:
+        setStatus(Ready);
+        break;
     }
-    DEB_TRACE() << "CameraThread::execCmd - END";
 }
 
 
@@ -116,7 +116,6 @@ void Camera::CameraThread::execStartAcq()
 {
 	
     DEB_MEMBER_FUNCT();
-    DEB_TRACE() << "CameraThread::execStartAcq - BEGIN";
     setStatus(Exposure);
     
     StdBufferCbMgr& buffer_mgr = m_cam->m_buffer_ctrl_obj.getBuffer();
@@ -142,16 +141,16 @@ void Camera::CameraThread::execStartAcq()
 	// -- read a first camera status
 	READ_STATUS();
 	// -- wait for an image
-	while (!m_force_stop && !IMAGE_READY)
+	while (getNextCmd() != StopAcq && !IMAGE_READY)
 	{
 	    READ_STATUS();
 	    //DEB_TRACE() << DEB_VAR2(camera_status, remaining_exposure);
 	    usleep(100);
 	}
 
-	if(m_force_stop)
+	if(getNextCmd() == StopAcq)
 	{
-	    m_force_stop = false;
+	    waitNextCmd();
 	    break;
 	}
 		
@@ -176,8 +175,6 @@ void Camera::CameraThread::execStartAcq()
     THROW_IF_NOT_SUCCESS(FLICancelExposure(m_cam->m_device), "Canot cancel exposure ");
        
     setStatus(Ready);
-    
-    DEB_TRACE() << "CameraThread::execStartAcq - END";
 }
 
 //---------------------------
@@ -280,9 +277,9 @@ void Camera::prepareAcq()
 void Camera::startAcq()
 {
     DEB_MEMBER_FUNCT();
-        
-    m_thread.m_force_stop = false;
-    
+    int status = m_thread.getStatus();
+    if (status != CameraThread::Ready)
+        THROW_HW_ERROR(Error) << "Camera not Ready";    
     m_thread.sendCmd(CameraThread::StartAcq);
     m_thread.waitNotStatus(CameraThread::Ready);
 }
@@ -293,10 +290,11 @@ void Camera::startAcq()
 void Camera::stopAcq()
 {
     DEB_MEMBER_FUNCT();
-    m_thread.m_force_stop = true;
     
-    m_thread.sendCmd(CameraThread::StopAcq);
-    m_thread.waitStatus(CameraThread::Ready);
+    if(m_thread.getStatus() != CameraThread::Ready) {
+        m_thread.sendCmd(CameraThread::StopAcq);
+        m_thread.waitStatus(CameraThread::Ready);
+    }
 
 }
 
@@ -541,11 +539,11 @@ void Camera::getStatus(Camera::Status& status)
     {
     case CameraThread::Ready:
 	status = Camera::Ready; break;
-    case CameraThread::Exposure: break;
+    case CameraThread::Exposure:
 	status =  Camera::Exposure; break;
-    case CameraThread::Readout: break;
+    case CameraThread::Readout:
 	status = Camera::Readout; break;
-    case CameraThread::Latency: break;
+    case CameraThread::Latency:
 	status =  Camera::Latency; break;
     default:
 	throw LIMA_HW_EXC(Error, "Invalid thread status");

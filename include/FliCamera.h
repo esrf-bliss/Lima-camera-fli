@@ -141,7 +141,7 @@ namespace lima
 	private:
 	    class CameraThread: public CmdThread
 	    {
-	      DEB_CLASS_NAMESPC(DebModCamera, "CameraThread", "Lambda");
+	      DEB_CLASS_NAMESPC(DebModCamera, "CameraThread", "Fli");
 	    public:
 	      enum
 	      { // Status
@@ -154,8 +154,8 @@ namespace lima
 	      };
 	      
 	      CameraThread(Camera& cam);	      
+	      ~CameraThread();	      
 	      virtual void start();
-	      bool m_force_stop;
 	      int  m_acq_frame_nb;
 	      
 	    protected:	      
