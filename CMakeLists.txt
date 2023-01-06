@@ -55,14 +55,8 @@ endif()
 
 
 #LIBRARY
-find_library(LIB_FLI NAMES fli
-  PATHS "${CMAKE_CURRENT_SOURCE_DIR}/sdk/libfli-1.104"
-  NO_CMAKE_FIND_ROOT_PATH
-  NO_DEFAULT_PATH
-  )
-if (("${LIB_FLI}" STREQUAL "LIB_FLI-NOTFOUND"))
-  message(FATAL_ERROR "${NAME} : libfli not found")
-endif()
+find_library(LIB_FLI NAMES fli)
+message("${LIB_FLI}")
 
 # CMake additional macros
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake ${LIMA_CMAKE_INCLUDE_DIRS} ${CMAKE_MODULE_PATH})
@@ -114,7 +108,6 @@ target_include_directories(fli
     PUBLIC "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
-target_include_directories(fli PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/sdk/libfli-1.104>")
 
 target_link_libraries(fli PUBLIC limacore ${LIB_FLI})
 

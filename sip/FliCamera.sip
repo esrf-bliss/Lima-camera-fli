@@ -80,7 +80,9 @@ namespace Fli
     void getCoolerPower(double& power /Out/);
     void setExtTriggerLevel(int level);
     void getExtTriggerLevel(int& level /Out/);
-    
+
+  private:
+    Camera(const Camera&);
   };
 
 };
